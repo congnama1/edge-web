@@ -18,8 +18,8 @@ def get_fd(sport, allow_fetch=True):
             return hit
         if not allow_fetch:
             return None
-        fd = es.get_fanduel(sport)
-        _fd_cache[sport] = (time.time(), fd)
+        data = es.get_propline(sport) if es.USE_PROPLINE else es.get_fanduel(sport)
+        _fd_cache[sport] = (time.time(), data)
         return _fd_cache[sport]
 
 
@@ -51,12 +51,14 @@ def api_debug():
     pp_src = pp_source(sport)
     out = {"sport": sport, "pp_data_pasted": bool(pp_src)}
     try:
-        fd = get_fd(sport)[1]
+        data = get_fd(sport)[1]
+        fd, pp_auto = data if es.USE_PROPLINE else (data, None)
+        out["provider"] = "propline" if es.USE_PROPLINE else "the-odds-api"
         out["fanduel_props_found"] = len(fd)
         out["fanduel_sample"] = [f"{k[0]} | {k[1]}" for k in list(fd)[:5]]
         out["odds_api_errors"] = es.ERRORS[:5]
         out["odds_api_credits_left"] = es.REMAINING.get("credits_left")
-        pp = es.get_prizepicks(sport, pp_src)
+        pp = pp_auto if es.USE_PROPLINE else es.get_prizepicks(sport, pp_src)
         out["prizepicks_props_found"] = len(pp)
         out["prizepicks_sample"] = [f"{p[0]} | {p[1]}" for p in pp[:5]]
         out["matched_player_and_stat"] = sum(1 for p in pp if (p[0], p[1]) in fd)
@@ -79,8 +81,13 @@ def api_scan():
         hit = get_fd(sport, allow_fetch=not peek)
         if hit is None:
             return jsonify(updated=0, count=0, rows=[], note="Tap Scan to load FanDuel odds (this uses Odds API credits).")
-        ts, fd = hit
-        flags = es.scan(sport, 0.50, pp_source(sport), fd=fd)
+        ts, data = hit
+        if es.USE_PROPLINE:
+            fd, pp = data
+            flags = es.scan(sport, 0.50, None, fd=fd, pp=pp)
+        else:
+            fd = data
+            flags = es.scan(sport, 0.50, pp_source(sport), fd=fd)
     except SystemExit as e:
         return jsonify(error=str(e)), 502
     except Exception as e:
