@@ -117,8 +117,9 @@ def get_prizepicks(sport, pp_file=None):
     return props
 
 
-def scan(sport, threshold, pp_file):
-    fd = get_fanduel(sport)
+def scan(sport, threshold, pp_file, fd=None):
+    if fd is None:
+        fd = get_fanduel(sport)
     flags = []
     for player, stat, pp_line, display in get_prizepicks(sport, pp_file):
         for fd_line, po, pu in fd.get((player, stat), []):
