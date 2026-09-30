@@ -36,6 +36,32 @@ def api_pp():
     return jsonify(ok=True)
 
 
+@app.route("/api/debug")
+def api_debug():
+    sport = request.args.get("sport", "nba")
+    if sport not in es.SPORTS:
+        return jsonify(error="bad sport"), 400
+    up = f"/tmp/pp_{sport}.json"
+    pp_src = up if os.path.exists(up) else PP_FILE
+    out = {"sport": sport, "pp_data_pasted": bool(pp_src)}
+    try:
+        fd = es.get_fanduel(sport)
+        out["fanduel_props_found"] = len(fd)
+        out["fanduel_sample"] = [f"{k[0]} | {k[1]}" for k in list(fd)[:5]]
+        out["odds_api_errors"] = es.ERRORS[:5]
+        out["odds_api_credits_left"] = es.REMAINING.get("credits_left")
+        pp = es.get_prizepicks(sport, pp_src)
+        out["prizepicks_props_found"] = len(pp)
+        out["prizepicks_sample"] = [f"{p[0]} | {p[1]}" for p in pp[:5]]
+        out["matched_player_and_stat"] = sum(1 for p in pp if (p[0], p[1]) in fd)
+        out["matched_player_only"] = len({p[0] for p in pp} & {k[0] for k in fd})
+    except SystemExit as ex:
+        out["error"] = str(ex)
+    except Exception as ex:
+        out["error"] = f"{type(ex).__name__}: {ex}"
+    return jsonify(out)
+
+
 @app.route("/api/scan")
 def api_scan():
     sport = request.args.get("sport", "nba")
@@ -68,6 +94,7 @@ td,th{padding:6px 4px;border-bottom:1px solid #262a33;text-align:left}
 <input id=thr type=number step=0.01 value=0.54 style=width:80px>
 <button onclick=load()>Scan</button>
 <div class=msg id=msg></div>
+<a id=dbg class=msg style="color:#7dd3fc" target=_blank>Why 0? Run diagnostics</a>
 <details style="margin-top:10px"><summary>PrizePicks blocked? Paste data manually</summary>
 <p class=msg>1) Open <a id=ppl style="color:#7dd3fc" target=_blank>this link</a> in your browser.<br>
 2) Select all text, copy it, paste below, tap Save.</p>
@@ -85,7 +112,8 @@ async function load(){
 }
 const LG={nba:7,nfl:9,mlb:2,nhl:8};
 function link(){ppl.href=`https://api.prizepicks.com/projections?league_id=${LG[sport.value]}&per_page=250&single_stat=true`}
-sport.onchange=link; link();
+function link2(){dbg.href='/api/debug?sport='+sport.value}
+sport.onchange=()=>{link();link2()}; link(); link2();
 async function savepp(){
   const r=await fetch(`/api/pp?sport=${sport.value}`,{method:'POST',body:pp.value});
   const d=await r.json();
