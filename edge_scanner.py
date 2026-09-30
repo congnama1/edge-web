@@ -27,6 +27,8 @@ import argparse, json, os, re, sys, time
 import requests
 
 ODDS_KEY = os.environ.get("ODDS_API_KEY", "")
+ERRORS = []      # odds api failures, for the debug page
+REMAINING = {}   # odds api credits left
 
 # sport -> (Odds API sport key, PrizePicks league id, {odds api market: PP stat name})
 SPORTS = {
@@ -68,12 +70,16 @@ def get_fanduel(sport):
     base = "https://api.the-odds-api.com/v4/sports"
     events = requests.get(f"{base}/{key}/events", params={"apiKey": ODDS_KEY}, timeout=20)
     events.raise_for_status()
+    REMAINING["credits_left"] = events.headers.get("x-requests-remaining")
+    ERRORS.clear()
     out = {}  # (player, stat) -> list of (line, p_over, p_under)
     for ev in events.json():
         r = requests.get(f"{base}/{key}/events/{ev['id']}/odds", params={
             "apiKey": ODDS_KEY, "regions": "us", "bookmakers": "fanduel",
             "markets": ",".join(markets), "oddsFormat": "american"}, timeout=20)
+        REMAINING["credits_left"] = r.headers.get("x-requests-remaining", REMAINING.get("credits_left"))
         if r.status_code != 200:
+            ERRORS.append(f"{r.status_code}: {r.text[:150]}")
             continue
         for bk in r.json().get("bookmakers", []):
             for mk in bk.get("markets", []):
