@@ -27,6 +27,8 @@ import argparse, json, os, re, sys, time
 import requests
 
 ODDS_KEY = os.environ.get("ODDS_API_KEY", "")
+PROPLINE_KEY = os.environ.get("PROPLINE_API_KEY", "")
+USE_PROPLINE = bool(PROPLINE_KEY)   # if set, FanDuel AND PrizePicks both come from PropLine
 ERRORS = []      # odds api failures, for the debug page
 REMAINING = {}   # odds api credits left
 
@@ -63,6 +65,52 @@ def devig(over_price, under_price):
     """Proportional no-vig probabilities (over, under)."""
     po, pu = implied(over_price), implied(under_price)
     return po / (po + pu), pu / (po + pu)
+
+
+def to_american(price):
+    """Accept American (-110) or decimal (1.91) odds; return American."""
+    price = float(price)
+    if abs(price) >= 100:
+        return price
+    return (price - 1) * 100 if price >= 2 else -100 / (price - 1)
+
+
+def get_propline(sport):
+    """One pass over PropLine: returns (fanduel dict, prizepicks list). Stats are keyed by market name."""
+    from propline import PropLine
+    client = PropLine(PROPLINE_KEY)
+    key, _, markets = SPORTS[sport]
+    fd, pp = {}, []
+    ERRORS.clear()
+    for ev in client.get_events(key):
+        try:
+            odds = client.get_odds(key, event_id=ev["id"], markets=list(markets))
+        except Exception as ex:
+            ERRORS.append(f"{type(ex).__name__}: {str(ex)[:150]}")
+            continue
+        for bk in odds.get("bookmakers", []):
+            book = bk.get("key")
+            if book not in ("fanduel", "prizepicks"):
+                continue
+            for mk in bk.get("markets", []):
+                by = {}
+                for o in mk.get("outcomes", []):
+                    if o.get("point") is None:
+                        continue
+                    if book == "prizepicks":
+                        if o.get("odds_type", "standard") != "standard":
+                            continue  # skip demons/goblins
+                        if o.get("payout_multiplier") not in (None, 1, 1.0):
+                            continue
+                    by.setdefault((norm(o["description"]), float(o["point"])), {})[o["name"]] = o
+                for (player, line), sides in by.items():
+                    if book == "fanduel" and "Over" in sides and "Under" in sides:
+                        po, pu = devig(to_american(sides["Over"]["price"]),
+                                       to_american(sides["Under"]["price"]))
+                        fd.setdefault((player, mk["key"]), []).append((line, po, pu))
+                    elif book == "prizepicks":
+                        pp.append((player, mk["key"], line, next(iter(sides.values()))["description"]))
+    return fd, pp
 
 
 def get_fanduel(sport):
@@ -117,11 +165,11 @@ def get_prizepicks(sport, pp_file=None):
     return props
 
 
-def scan(sport, threshold, pp_file, fd=None):
+def scan(sport, threshold, pp_file, fd=None, pp=None):
     if fd is None:
         fd = get_fanduel(sport)
     flags = []
-    for player, stat, pp_line, display in get_prizepicks(sport, pp_file):
+    for player, stat, pp_line, display in (pp if pp is not None else get_prizepicks(sport, pp_file)):
         for fd_line, po, pu in fd.get((player, stat), []):
             if pp_line == fd_line:
                 kind = "EXACT"
