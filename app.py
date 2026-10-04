@@ -1,4 +1,4 @@
-import os, time, threading, json
+import os, time, threading, json, traceback
 from flask import Flask, jsonify, request, Response
 import edge_scanner as es
 
@@ -49,11 +49,13 @@ def api_debug():
     if sport not in es.SPORTS:
         return jsonify(error="bad sport"), 400
     pp_src = pp_source(sport)
-    out = {"sport": sport, "pp_data_pasted": bool(pp_src)}
+    out = {"version": es.VERSION, "sport": sport, "pp_data_pasted": bool(pp_src)}
     try:
         data = get_fd(sport)[1]
         fd, pp_auto = data if es.USE_PROPLINE else (data, None)
         out["provider"] = "propline" if es.USE_PROPLINE else "the-odds-api"
+        if es.USE_PROPLINE:
+            out["propline_saw"] = es.SEEN
         out["fanduel_props_found"] = len(fd)
         out["fanduel_sample"] = [f"{k[0]} | {k[1]}" for k in list(fd)[:5]]
         out["odds_api_errors"] = es.ERRORS[:5]
@@ -63,10 +65,9 @@ def api_debug():
         out["prizepicks_sample"] = [f"{p[0]} | {p[1]}" for p in pp[:5]]
         out["matched_player_and_stat"] = sum(1 for p in pp if (p[0], p[1]) in fd)
         out["matched_player_only"] = len({p[0] for p in pp} & {k[0] for k in fd})
-    except SystemExit as ex:
-        out["error"] = str(ex)
-    except Exception as ex:
+    except BaseException as ex:
         out["error"] = f"{type(ex).__name__}: {ex}"
+        out["trace"] = traceback.format_exc()[-900:]
     return jsonify(out)
 
 
@@ -88,10 +89,8 @@ def api_scan():
         else:
             fd = data
             flags = es.scan(sport, 0.50, pp_source(sport), fd=fd)
-    except SystemExit as e:
-        return jsonify(error=str(e)), 502
-    except Exception as e:
-        return jsonify(error=f"{type(e).__name__}: {e}"), 502
+    except BaseException as e:
+        return jsonify(error=f"{type(e).__name__}: {e}", trace=traceback.format_exc()[-900:]), 502
     rows = [dict(prob=round(p, 4), kind=k, player=n, stat=s, side=sd, pp_line=pl, fd_line=fl)
             for p, k, n, s, sd, pl, fl in flags if p > thr]
     warn = es.ERRORS[0] if es.ERRORS else None
