@@ -29,7 +29,9 @@ import requests
 ODDS_KEY = os.environ.get("ODDS_API_KEY", "")
 PROPLINE_KEY = os.environ.get("PROPLINE_API_KEY", "")
 USE_PROPLINE = bool(PROPLINE_KEY)   # if set, FanDuel AND PrizePicks both come from PropLine
+VERSION = "v7-2026-10-03"
 ERRORS = []      # odds api failures, for the debug page
+SEEN = {}        # what PropLine returned, for the debug page
 REMAINING = {}   # odds api credits left
 
 # sport -> (Odds API sport key, PrizePicks league id, {odds api market: PP stat name})
@@ -75,40 +77,93 @@ def to_american(price):
     return (price - 1) * 100 if price >= 2 else -100 / (price - 1)
 
 
+def _sdk_call(fn, *a, **k):
+    """Run a PropLine SDK call; if it prints something and exits, surface that message."""
+    import io, contextlib
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            return fn(*a, **k)
+    except BaseException as ex:
+        out = buf.getvalue().strip()[-300:]
+        raise RuntimeError(f"PropLine {type(ex).__name__} {ex} | library said: {out or '(nothing)'}")
+
+
 def get_propline(sport):
     """One pass over PropLine: returns (fanduel dict, prizepicks list). Stats are keyed by market name."""
-    from propline import PropLine
-    client = PropLine(PROPLINE_KEY)
+    try:
+        from propline import PropLine
+        client = PropLine(PROPLINE_KEY)
+    except BaseException as ex:  # includes SystemExit raised inside the library
+        raise RuntimeError(f"PropLine setup failed: {type(ex).__name__}: {ex}")
     key, _, markets = SPORTS[sport]
     fd, pp = {}, []
     ERRORS.clear()
-    for ev in client.get_events(key):
+    SEEN.clear()
+    SEEN.update(events=0, books={}, markets={}, fanduel_sample=None, pp_skipped_unequal=0, pp_raw=[], pp_outcome_fields=[], pp_market_fields=[], pp_book_fields=[])
+    try:
+        events = _sdk_call(client.get_events, key)
+    except BaseException as ex:
+        raise RuntimeError(f"PropLine get_events failed: {type(ex).__name__}: {ex}")
+    SEEN["events"] = len(events)
+    for ev in events:
         try:
-            odds = client.get_odds(key, event_id=ev["id"], markets=list(markets))
-        except Exception as ex:
-            ERRORS.append(f"{type(ex).__name__}: {str(ex)[:150]}")
+            odds = _sdk_call(client.get_odds, key, event_id=ev["id"], markets=list(markets))
+        except BaseException as ex:
+            ERRORS.append(f"{type(ex).__name__}: {str(ex)[:300]}")
             continue
         for bk in odds.get("bookmakers", []):
-            book = bk.get("key")
-            if book not in ("fanduel", "prizepicks"):
+            raw = str(bk.get("key") or bk.get("title") or "")
+            SEEN["books"][raw] = SEEN["books"].get(raw, 0) + len(bk.get("markets", []))
+            low = raw.lower().replace(" ", "")
+            book = "fanduel" if "fanduel" in low else "prizepicks" if "prizepicks" in low else None
+            if book is None:
                 continue
+            if book == "prizepicks":
+                SEEN["pp_book_fields"] = sorted(set(SEEN["pp_book_fields"]) | {k for k in bk if k != "markets"})
             for mk in bk.get("markets", []):
+                SEEN["markets"][f"{book}:{mk.get('key')}"] = len(mk.get("outcomes", []))
+                if book == "prizepicks":
+                    SEEN["pp_market_fields"] = sorted(set(SEEN["pp_market_fields"]) | {k for k in mk if k != "outcomes"})
+                    for o in mk.get("outcomes", []):
+                        SEEN["pp_outcome_fields"] = sorted(set(SEEN["pp_outcome_fields"]) | set(o))
+                        if len(SEEN["pp_raw"]) < 10:
+                            SEEN["pp_raw"].append(dict(o, _market=mk.get("key")))
+                if book == "fanduel" and SEEN["fanduel_sample"] is None and mk.get("outcomes"):
+                    SEEN["fanduel_sample"] = mk["outcomes"][0]
                 by = {}
                 for o in mk.get("outcomes", []):
                     if o.get("point") is None:
                         continue
                     if book == "prizepicks":
-                        if o.get("odds_type", "standard") != "standard":
-                            continue  # skip demons/goblins
-                        if o.get("payout_multiplier") not in (None, 1, 1.0):
+                        # skip anything that is not an equal-payout line (demons/goblins)
+                        ot = ""
+                        for f in ("dfs_odds_type", "odds_type", "line_type", "type", "tier"):
+                            if o.get(f):
+                                ot = str(o[f]).lower()
+                                break
+                        if ot not in ("", "standard", "normal", "default", "none"):
+                            SEEN["pp_skipped_unequal"] += 1
                             continue
-                    by.setdefault((norm(o["description"]), float(o["point"])), {})[o["name"]] = o
+                        if o.get("payout_multiplier") not in (None, 1, 1.0):
+                            SEEN["pp_skipped_unequal"] += 1
+                            continue
+                    if not o.get("description"):
+                        continue
+                    by.setdefault((norm(o["description"]), float(o["point"])), {})[str(o.get("name", "")).capitalize()] = o
                 for (player, line), sides in by.items():
                     if book == "fanduel" and "Over" in sides and "Under" in sides:
                         po, pu = devig(to_american(sides["Over"]["price"]),
                                        to_american(sides["Under"]["price"]))
                         fd.setdefault((player, mk["key"]), []).append((line, po, pu))
                     elif book == "prizepicks":
+                        if "Over" in sides and "Under" in sides:
+                            try:
+                                if abs(to_american(sides["Over"]["price"]) - to_american(sides["Under"]["price"])) > 1:
+                                    SEEN["pp_skipped_unequal"] += 1
+                                    continue  # sides pay differently, so not an equal line
+                            except (KeyError, TypeError, ValueError):
+                                pass
                         pp.append((player, mk["key"], line, next(iter(sides.values()))["description"]))
     return fd, pp
 
